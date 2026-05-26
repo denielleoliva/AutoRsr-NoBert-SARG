@@ -1,201 +1,215 @@
-#endpoints map:
-#
-#transcription step -> takes a mp3 
-#returns json of transcription.
-
-#alignment step -> takes ground truth and output, if not provided assume default gt
-#returning the aligned response and response. Will return "" if nothing is matchable/too wrong
-#Do note, this matches SENTENCES. I have a option that will return best substring, so lmk ig
-#See formatting later below
-
-#edit-sequence/errors step -> takes aligned output in a certain format (shown below)
-#scores" the output, returning BOTH the scores, and the errors made
-#Ideally the frontend should have a visual that can take the errors made and 
-#"unscramble" it to show the corrected sentence in a dropdown or something 
-#errors, edit sequence, score in list form 
-
-#scoring-step -> takes errors made, percentile and age and returns score and pass/fail
-
-#master endpoint -> will take mp3 + text file + percentile and return the output of 
-#transcription + alignment + scoring. This can be the "main" pipeline 
-#and "playground" where you can test individual components by calling above.
-#It will return a mega json, which I will attach in the repo as an example
-
-#formatting
-#transcription output will be formatted like this:
-'''
-{
-        "Transcription": "the black ball washed onto the blue ocean. the quick fox brown jumps. hello world".
-    }
-'''
-
-#aligned input:
-'''
-{
-        "Transcription": "the black ball washed onto the blue ocean. the quick fox brown jumps. hello world."
-        "Ground Truth":"The black ball washed into the blue ocean. The quick brown fox jumps. Hello World."
-    }
-'''
-#aligned output:
-'''
-{
-        "Sentences": [
-            {
-                "id": "1",
-                "Ground Truth": "blue ball washed onto the black ocean",
-                "Aligned": "the black ball washed onto the blue ocean. the quick fox brown jumps. hello world"
-            },
-            {
-                "id": "2",
-                "Ground Truth": "the quick brown fox jumps",
-                "Aligned": "the quick fox brown jumps"
-            },
-            {
-                "id": "3",
-                "Ground Truth": "hello world",
-                "Aligned": "hello wrold"
-            }
-        ]
-'''
-
-#scoring step like this:
-'''
-data = {
-        "Sentences": [
-            {
-                "id": "1",
-                "Sentence": "the black ball washed onto the blue ocean",
-                "Errors": 2,
-                "Score": 1,
-                "Edit Script": {'Insertions': [], 'Deletions': [(0, 'the')], 'Substitutions': [], 'Swaps': [(0, 5, 'black', 'blue')]}
-            },
-            {
-                "id": "2",
-                "Sentence": "the quick brown fox jumps",
-                "Errors": 1,
-                "Score": 1,
-                "Edit Script": {'Insertions': [], 'Deletions': [], 'Substitutions': [], 'Swaps': [(2, 3, 'fox', 'brown')]}
-            },
-            {
-                "id": "3",
-                "Sentence": "hello world",
-                "Errors": 1,
-                "Score": 1,
-                "Edit Script": {'Insertions': [], 'Deletions': [], 'Substitutions': [], 'Swaps': [(2, 3, 'fox', 'brown')]}
-            }
-        ]
-'''
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template, send_from_directory
 import os
+import datetime
 import json
-import re
-from auto_rsr import transcribe_to_json, align_transcription_to_ground_truth, generate_edit_sequences_and_score, evaluate_rsr_result, run_full_rsr_analysis
+import subprocess
+import whisperx
+import db as database
+from auto_rsr import standarize, score_rsr_errors, score_rsr, evaluate_rsr_result
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER_WAV = 'uploads/wav_file'
-UPLOAD_FOLDER_TEXT = 'uploads/text_file'
-os.makedirs(UPLOAD_FOLDER_WAV, exist_ok=True)
-os.makedirs(UPLOAD_FOLDER_TEXT, exist_ok=True)
+SENTENCE_AUDIO_FOLDER = 'sentence_audio'
+RECORDINGS_FOLDER     = 'uploads/recordings'
+PRE_ROLL_MS           = 2000  # seconds of audio before marker start to include
 
-# --- TRANSCRIPTION ---
-@app.route('/transcribe', methods=['POST'])
-def transcribe():
-    if 'wav_file' not in request.files:
-        return jsonify({"error": "Missing WAV file"}), 400
+os.makedirs(SENTENCE_AUDIO_FOLDER, exist_ok=True)
+os.makedirs(RECORDINGS_FOLDER, exist_ok=True)
 
-    wav_file = request.files['wav_file']
-    if wav_file.filename == '':
-        return jsonify({"error": "No file selected"}), 400
+database.init_db()
 
-    wav_path = os.path.join(UPLOAD_FOLDER_WAV, wav_file.filename)
-    wav_file.save(wav_path)
+GROUND_TRUTH = [
+    "The big football player washed the car with the hose.",
+    "All of the pictures were colored by his little sister.",
+    "The rose bushes were planted yesterday by the girl scouts.",
+    "The happy little girl kicked the ball over the fence.",
+    "His little brother cleaned the dirty dishes and cups.",
+    "A special cage was made to hold the dangerous animals.",
+    "Everybody in my school colored Easter eggs for the picnic.",
+    "A new hole was dug for the kid's swimming pool.",
+    "Only the first graders made a birdhouse for their parents.",
+    "My little sister's dog caught the ball on the first bounce.",
+    "The soccer ball was kicked into the school's parking lot.",
+    "The lion's teeth were cleaned with a giant toothbrush.",
+    "Some of the kids dug holes in the sand two feet deep.",
+    "The little white mouse was caught by our neighbor's cat.",
+    "The second grade students planted coconuts in the garden.",
+    "The dirty clothes were washed with soap one more time.",
+]
 
-    try:
-        result = transcribe_to_json(wav_path)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# --- Route 2: Alignment Step ---
-@app.route('/align', methods=['POST'])
-def align():
-    data = request.get_json()
-    if not data or "Transcription" not in data:
-        return jsonify({"error": "Missing 'Transcription' field in JSON"}), 400
-
-    ground_truth = data.get("Ground Truth")  # Optional
-    try:
-        result = align_transcription_to_ground_truth(data, ground_truth_text=ground_truth)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+_whisper_model = None
 
 
-# --- Route 3: Edit Sequence / Scoring Step ---
-@app.route('/edit_score', methods=['POST'])
-def edit_score():
-    data = request.get_json()
-    if not data or "Sentences" not in data:
-        return jsonify({"error": "Missing 'Sentences' field in JSON"}), 400
-
-    try:
-        result = generate_edit_sequences_and_score(data)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+def get_model():
+    global _whisper_model
+    if _whisper_model is None:
+        _whisper_model = whisperx.load_model(
+            "large-v3", "cuda", compute_type="float16", language="en"
+        )
+    return _whisper_model
 
 
-# --- Route 4: Scoring Step (Pass/Fail) ---
-@app.route('/decision', methods=['POST'])
-def decision():
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "Missing JSON body"}), 400
-
-    score = data.get("Score")
-    age = data.get("Age")
-    percentile = data.get("Percentile", 5)
-
-    try:
-        result = evaluate_rsr_result(score, age, percentile)
-        return jsonify({"result": result})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+def transcribe_file(path):
+    model = get_model()
+    audio = whisperx.load_audio(path)
+    result = model.transcribe(audio, batch_size=16)
+    texts = [seg["text"].strip() for seg in result.get("segments", []) if "text" in seg]
+    return " ".join(texts).strip()
 
 
-# --- Route 5: Master Endpoint ---
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    if 'wav_file' not in request.files:
-        return jsonify({"error": "Missing WAV file"}), 400
-
-    wav_file = request.files['wav_file']
-    age = request.form.get("Age")
-    percentile = request.form.get("Percentile", 5)
-    gt_text = request.form.get("Ground Truth", None)
-
-    if wav_file.filename == '':
-        return jsonify({"error": "No WAV file selected"}), 400
-
-    try:
-        age = int(age)
-        percentile = int(percentile)
-    except (ValueError, TypeError):
-        return jsonify({"error": "Age and percentile must be integers"}), 400
-
-    wav_path = os.path.join(UPLOAD_FOLDER_WAV, wav_file.filename)
-    wav_file.save(wav_path)
-
-    result = run_full_rsr_analysis(
-        wav_path,
-        age_in_months=age,
-        percentile=percentile,
-        ground_truth_text=gt_text
+def slice_audio(session_path, start_ms, end_ms, out_path):
+    """Slice session audio between start_ms and end_ms using ffmpeg."""
+    start_s = max(0.0, (start_ms - PRE_ROLL_MS) / 1000)
+    end_s   = end_ms / 1000
+    subprocess.run(
+        ['ffmpeg', '-y', '-i', session_path,
+         '-ss', f'{start_s:.3f}',
+         '-to', f'{end_s:.3f}',
+         out_path],
+        check=True,
+        capture_output=True,
     )
 
-    return jsonify(result)
+
+def find_audio_file(sentence_number):
+    for ext in ['mp3', 'wav', 'ogg', 'm4a', 'webm']:
+        for pattern in [
+            str(sentence_number),
+            f'sentence_{sentence_number}',
+            f'sentence_{sentence_number:02d}',
+        ]:
+            fname = f'{pattern}.{ext}'
+            if os.path.exists(os.path.join(SENTENCE_AUDIO_FOLDER, fname)):
+                return fname
+    return None
+
+
+# --- Routes ---
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+
+@app.route('/api/sentences')
+def get_sentences():
+    sentences = []
+    for i, text in enumerate(GROUND_TRUTH, start=1):
+        audio_file = find_audio_file(i)
+        sentences.append({
+            'id': i,
+            'text': text,
+            'audio_url': f'/audio/{audio_file}' if audio_file else None,
+        })
+    return jsonify(sentences)
+
+
+@app.route('/audio/<path:filename>')
+def serve_audio(filename):
+    return send_from_directory(SENTENCE_AUDIO_FOLDER, filename)
+
+
+@app.route('/api/analyze', methods=['POST'])
+def analyze():
+    patient_id = request.form.get('patient_id', '').strip()
+    age        = request.form.get('age')
+    percentile = request.form.get('percentile', 5)
+
+    try:
+        age        = int(age)
+        percentile = int(percentile)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Age and percentile must be integers'}), 400
+
+    if 'session_audio' not in request.files:
+        return jsonify({'error': 'Missing session audio'}), 400
+
+    raw_markers = request.form.get('markers', '[]')
+    try:
+        markers = json.loads(raw_markers)
+    except json.JSONDecodeError:
+        return jsonify({'error': 'Invalid markers JSON'}), 400
+
+    if not markers:
+        return jsonify({'error': 'No sentence markers received'}), 400
+
+    timestamp      = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    session_folder = os.path.join(RECORDINGS_FOLDER, timestamp)
+    os.makedirs(session_folder, exist_ok=True)
+
+    # Save the full session recording
+    session_path = os.path.join(session_folder, 'session.webm')
+    request.files['session_audio'].save(session_path)
+
+    marker_map = {m['sentence_id']: m for m in markers}
+
+    sentence_results = []
+    recording_paths  = {}
+
+    for i, gt in enumerate(GROUND_TRUTH, start=1):
+        marker = marker_map.get(i)
+
+        if not marker:
+            sentence_results.append({
+                'id': str(i), 'Ground Truth': gt, 'Sentence': '',
+                'Errors': 0, 'Score': 0,
+                'Edit Script': {'Insertions': [], 'Deletions': [], 'Substitutions': [], 'Swaps': []},
+            })
+            continue
+
+        slice_path = os.path.join(session_folder, f'sentence_{i}.wav')
+
+        try:
+            slice_audio(session_path, marker['start_ms'], marker['end_ms'], slice_path)
+            recording_paths[i] = slice_path
+
+            transcription = transcribe_file(slice_path)
+            gt_std   = standarize(gt)
+            resp_std = standarize(transcription)
+            edits    = score_rsr_errors(resp_std.split(), gt_std.split())
+            errors   = sum(len(v) for v in edits.values())
+            score    = score_rsr([errors])
+        except Exception:
+            resp_std = ''
+            edits    = {'Insertions': [], 'Deletions': [], 'Substitutions': [], 'Swaps': []}
+            errors   = 0
+            score    = 0
+
+        sentence_results.append({
+            'id': str(i), 'Ground Truth': gt, 'Sentence': resp_std,
+            'Errors': errors, 'Score': score, 'Edit Script': edits,
+        })
+
+    total_score = sum(s['Score'] for s in sentence_results)
+    result      = evaluate_rsr_result(total_score, age, percentile)
+
+    try:
+        session_id = database.save_session(
+            patient_id, age, percentile, total_score, result,
+            sentence_results, recording_paths, session_folder,
+        )
+    except Exception:
+        session_id = None
+
+    return jsonify({
+        'session_id': session_id,
+        'Decision': {
+            'Total Score': total_score,
+            'Result': result,
+            'Age (months)': age,
+            'Percentile': percentile,
+        },
+        'Edit and Score': {
+            'Sentences': sentence_results,
+            'Total Score': total_score,
+        },
+    })
+
+
+@app.route('/api/sessions')
+def get_sessions():
+    return jsonify(database.get_sessions())
+
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, threaded=True)

@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoRSR Screening</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:      #EEEDE8;
+      --white:   #FFFFFF;
+      --primary: #F05228;
+      --dark:    #111111;
+      --muted:   #888880;
+      --border:  #DDDDD6;
+      --yellow:  #FFD633;
+      --green:   #22C55E;
+      --red:     #EF4444;
+      --r-sm:    8px;
+      --r-md:    14px;
+      --r-lg:    20px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--dark);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+
+    .screen { display: none; width: 100%; max-width: 580px; }
+    .screen.active { display: block; }
+
+    .card {
+      background: var(--white);
+      border-radius: var(--r-lg);
+      border: 1.5px solid var(--border);
+      padding: 40px;
+    }
+
+    /* Typography */
+    h1 { font-size: 2rem; font-weight: 800; color: var(--dark); margin-bottom: 8px; line-height: 1.15; }
+    .subtitle { color: var(--muted); margin-bottom: 32px; font-size: 0.95rem; line-height: 1.6; }
+    .section-label {
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .08em; color: var(--muted); margin-bottom: 20px;
+    }
+
+    /* Form */
+    .form-group { margin-bottom: 16px; }
+    label { display: block; font-size: 0.82rem; font-weight: 600; color: var(--dark); margin-bottom: 6px; }
+    input, select {
+      width: 100%; padding: 11px 14px;
+      border: 1.5px solid var(--border); border-radius: var(--r-sm);
+      font-size: 0.95rem; font-family: inherit; outline: none;
+      background: var(--white); color: var(--dark);
+      transition: border-color .15s;
+    }
+    input:focus, select:focus { border-color: var(--dark); }
+    input::placeholder { color: #BBBBB4; }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      padding: 13px 24px; border: none; border-radius: var(--r-sm);
+      font-size: 0.9rem; font-weight: 700; font-family: inherit;
+      cursor: pointer; transition: opacity .15s; letter-spacing: .01em;
+    }
+    .btn:disabled { opacity: .38; cursor: not-allowed; }
+    .btn-black  { background: var(--dark);    color: var(--white); width: 100%; margin-top: 10px; }
+    .btn-black:not(:disabled):hover  { opacity: .85; }
+    .btn-orange { background: var(--primary); color: var(--white); }
+    .btn-orange:not(:disabled):hover { opacity: .88; }
+    .btn-outline { background: var(--white); color: var(--dark); border: 1.5px solid var(--border); }
+    .btn-outline:not(:disabled):hover { border-color: var(--dark); }
+    .btn-red    { background: var(--red);     color: var(--white); }
+    .btn-red:not(:disabled):hover    { opacity: .88; }
+    .btn-full { width: 100%; }
+
+    /* Progress */
+    .progress-wrap { margin-bottom: 24px; }
+    .progress-label {
+      display: flex; justify-content: space-between;
+      font-size: .8rem; font-weight: 600; color: var(--muted); margin-bottom: 8px;
+    }
+    .progress-track { background: var(--border); border-radius: 99px; height: 5px; overflow: hidden; }
+    .progress-fill  { background: var(--primary); height: 100%; border-radius: 99px; transition: width .4s ease; }
+
+    /* Sentence display */
+    .sentence-box {
+      background: var(--yellow);
+      border-radius: var(--r-md);
+      padding: 24px 28px;
+      font-size: 1.15rem; font-weight: 700; line-height: 1.6;
+      color: var(--dark); text-align: center;
+      margin: 20px 0;
+    }
+
+    /* Controls */
+    .controls { display: flex; flex-direction: column; gap: 10px; }
+    .control-row { display: flex; gap: 10px; }
+    .control-row .btn { flex: 1; }
+
+    .status-text {
+      font-size: .82rem; font-weight: 500; color: var(--muted);
+      text-align: center; min-height: 18px;
+    }
+
+    /* Recording active */
+    .rec-bar {
+      display: flex; align-items: center; gap: 12px;
+      background: #FFF1F1; border: 1.5px solid #FECACA;
+      border-radius: var(--r-sm); padding: 14px 16px;
+    }
+    .rec-dot-wrap { display: flex; align-items: center; gap: 6px; flex: 1; }
+    .rec-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--red); animation: blink 1s infinite;
+      flex-shrink: 0;
+    }
+    @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .15; } }
+    .rec-label { font-size: .85rem; font-weight: 600; color: #7F1D1D; }
+    .rec-timer { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--red); font-size: .9rem; }
+
+    .confirm-badge {
+      text-align: center; font-weight: 700; font-size: .9rem;
+      color: #166534; padding: 13px; background: #F0FDF4;
+      border-radius: var(--r-sm); border: 1.5px solid #BBF7D0;
+    }
+
+    /* Processing */
+    .processing-wrap { text-align: center; padding: 48px 0; }
+    .spinner {
+      width: 44px; height: 44px;
+      border: 3px solid var(--border); border-top-color: var(--primary);
+      border-radius: 50%; animation: spin .75s linear infinite;
+      margin: 0 auto 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .processing-wrap h2 { font-size: 1.25rem; font-weight: 700; margin-bottom: 8px; }
+    .processing-wrap p { color: var(--muted); font-size: .9rem; line-height: 1.6; }
+
+    /* Results */
+    .decision-banner {
+      text-align: center; padding: 22px;
+      border-radius: var(--r-md); font-size: 1.5rem;
+      font-weight: 800; margin-bottom: 22px; letter-spacing: .04em;
+    }
+    .pass { background: #DCFCE7; color: #166534; }
+    .fail { background: #FFE4D6; color: #9A1E00; }
+    .na   { background: var(--bg);   color: var(--muted); }
+
+    .meta-row { display: flex; gap: 8px; margin-bottom: 26px; flex-wrap: wrap; }
+    .chip {
+      flex: 1; min-width: 80px; background: var(--bg);
+      border-radius: var(--r-sm); padding: 14px 8px; text-align: center;
+      border: 1.5px solid var(--border);
+    }
+    .chip .val { font-size: 1.2rem; font-weight: 800; color: var(--dark); }
+    .chip .lbl { font-size: .68rem; font-weight: 600; color: var(--muted); margin-top: 3px; text-transform: uppercase; letter-spacing: .06em; }
+
+    /* Table */
+    .table-wrap { overflow-x: auto; margin-bottom: 24px; }
+    table { width: 100%; border-collapse: collapse; font-size: .83rem; }
+    thead tr { background: var(--bg); }
+    th {
+      padding: 9px 10px; text-align: left; font-size: .7rem;
+      font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+      border-bottom: 1.5px solid var(--border);
+    }
+    td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    .s0 { color: var(--red); font-weight: 700; }
+    .s1 { color: #D97706; font-weight: 700; }
+    .s2 { color: var(--green); font-weight: 700; }
+
+    .tag {
+      display: inline-block; padding: 1px 6px; border-radius: 4px;
+      font-size: .7rem; font-weight: 600; margin: 1px;
+    }
+    .tag-ins  { background: #DCFCE7; color: #166534; }
+    .tag-del  { background: #FFE4D6; color: #9A1E00; }
+    .tag-sub  { background: #FEF9C3; color: #854D0E; }
+    .tag-swap { background: #DBEAFE; color: #1E40AF; }
+    .edits { margin-top: 4px; }
+
+    .err-box {
+      background: #FFE4D6; color: #9A1E00; border-radius: var(--r-sm);
+      padding: 12px 16px; font-size: .85rem; font-weight: 500;
+      margin-top: 12px; border: 1.5px solid #FDBA9A;
+    }
+
+    .divider { border: none; border-top: 1.5px solid var(--border); margin: 24px 0; }
+  </style>
+</head>
+<body>
+
+<!-- WELCOME -->
+<div id="s-welcome" class="screen active">
+  <div class="card">
+    <h1>AutoRSR<br>Screening</h1>
+    <p class="subtitle">Automated reading screening assessment.<br>Enter patient details to begin.</p>
+
+    <div class="form-group">
+      <label for="patient-id">Patient ID</label>
+      <input type="text" id="patient-id" placeholder="Optional" />
+    </div>
+    <div class="form-group">
+      <label for="age">Age (months)</label>
+      <input type="number" id="age" min="0" max="120" placeholder="e.g. 72" />
+    </div>
+    <div class="form-group">
+      <label for="percentile">Percentile cutoff</label>
+      <select id="percentile">
+        <option value="5">5th percentile</option>
+        <option value="10">10th percentile</option>
+        <option value="15">15th percentile</option>
+      </select>
+    </div>
+
+    <button class="btn btn-black" id="start-btn">Begin Screening</button>
+    <div id="welcome-err" class="err-box" style="display:none"></div>
+  </div>
+</div>
+
+<!-- SCREENING -->
+<div id="s-screening" class="screen">
+  <div class="card">
+    <div class="progress-wrap">
+      <div class="progress-label">
+        <span id="sentence-counter">Sentence 1 of 16</span>
+        <span id="sentence-pct">0%</span>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+      </div>
+    </div>
+
+    <div class="sentence-box" id="sentence-text"></div>
+
+    <div class="controls">
+      <div class="control-row">
+        <button class="btn btn-outline" id="play-btn">Play Sentence</button>
+        <button class="btn btn-outline" id="replay-btn" style="display:none">Replay</button>
+      </div>
+
+      <p class="status-text" id="audio-status">Press Play to hear the sentence.</p>
+
+      <!-- Session recording badge (always visible during screening) -->
+      <div class="rec-bar" id="session-rec-bar" style="display:none">
+        <div class="rec-dot-wrap">
+          <div class="rec-dot"></div>
+          <span class="rec-label">Session recording</span>
+        </div>
+        <span class="rec-timer" id="session-timer">0:00</span>
+      </div>
+
+      <button class="btn btn-red btn-full" id="stop-btn" disabled>Stop — child finished reading</button>
+
+      <div id="rec-confirm" style="display:none" class="confirm-badge">Marked — moving to next sentence</div>
+      <div id="screen-err" class="err-box" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<!-- PROCESSING -->
+<div id="s-processing" class="screen">
+  <div class="card">
+    <div class="processing-wrap">
+      <div class="spinner"></div>
+      <h2>Analyzing responses</h2>
+      <p>Transcribing and scoring all sentences.<br>This may take a few minutes — please wait.</p>
+    </div>
+  </div>
+</div>
+
+<!-- RESULTS -->
+<div id="s-results" class="screen">
+  <div class="card">
+    <div id="result-banner" class="decision-banner"></div>
+
+    <div class="meta-row">
+      <div class="chip"><div class="val" id="r-score">—</div><div class="lbl">Score</div></div>
+      <div class="chip"><div class="val" id="r-age">—</div><div class="lbl">Age (mo)</div></div>
+      <div class="chip"><div class="val" id="r-pct">—</div><div class="lbl">Percentile</div></div>
+      <div class="chip"><div class="val" id="r-session">—</div><div class="lbl">Session</div></div>
+    </div>
+
+    <p class="section-label">Sentence Breakdown</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Ground Truth</th>
+            <th>Response</th>
+            <th>Err</th>
+            <th>Score</th>
+          </tr>
+        </thead>
+        <tbody id="results-table"></tbody>
+      </table>
+    </div>
+
+    <button class="btn btn-black btn-full" id="new-btn">Start New Screening</button>
+  </div>
+</div>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────────────
+  let sentences          = [];
+  let currentIdx         = 0;
+  let sessionInfo        = {};
+
+  // Continuous recording
+  let sessionRecorder    = null;
+  let sessionChunks      = [];
+  let recordingStartTime = null;
+  let sessionTimerInterval = null;
+  let sessionSeconds     = 0;
+
+  // Per-sentence markers: [{sentence_id, start_ms, end_ms}]
+  let markers            = [];
+  let currentMarkerStart = null;
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function show(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+  }
+
+  function esc(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function elapsed() {
+    return Date.now() - recordingStartTime;
+  }
+
+  function showWelcomeErr(msg) {
+    const el = document.getElementById('welcome-err');
+    el.textContent = msg; el.style.display = 'block';
+  }
+
+  function showScreenErr(msg) {
+    const el = document.getElementById('screen-err');
+    el.textContent = msg; el.style.display = 'block';
+  }
+
+  // ── Welcome ────────────────────────────────────────────────────────────────
+  document.getElementById('start-btn').addEventListener('click', async () => {
+    const age = document.getElementById('age').value.trim();
+    if (!age || isNaN(age) || Number(age) < 0) {
+      showWelcomeErr('Please enter a valid age in months.'); return;
+    }
+    document.getElementById('welcome-err').style.display = 'none';
+
+    sessionInfo = {
+      patientId:  document.getElementById('patient-id').value.trim(),
+      age:        Number(age),
+      percentile: Number(document.getElementById('percentile').value),
+    };
+
+    // Load sentences
+    try {
+      const res = await fetch('/api/sentences');
+      sentences = await res.json();
+    } catch {
+      showWelcomeErr('Could not load sentences from server.'); return;
+    }
+
+    // Request mic and start continuous recording before navigating
+    if (!navigator.mediaDevices?.getUserMedia) {
+      showWelcomeErr('Microphone not available in this browser.'); return;
+    }
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (e) {
+      showWelcomeErr('Microphone access denied: ' + e.message); return;
+    }
+
+    sessionChunks = [];
+    markers       = [];
+    currentIdx    = 0;
+
+    const mimeType = ['audio/ogg;codecs=opus','audio/ogg','audio/webm;codecs=opus','audio/webm','']
+      .find(t => t === '' || MediaRecorder.isTypeSupported(t));
+
+    sessionRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+    sessionRecorder.ondataavailable = e => { if (e.data?.size > 0) sessionChunks.push(e.data); };
+    sessionRecorder.start(100);
+    recordingStartTime = Date.now();
+
+    // Session-level timer (displayed in rec bar)
+    sessionSeconds = 0;
+    sessionTimerInterval = setInterval(() => {
+      sessionSeconds++;
+      const m = Math.floor(sessionSeconds / 60);
+      const s = String(sessionSeconds % 60).padStart(2, '0');
+      document.getElementById('session-timer').textContent = `${m}:${s}`;
+    }, 1000);
+
+    show('s-screening');
+    loadSentence(0);
+  });
+
+  // ── Screening ──────────────────────────────────────────────────────────────
+  function loadSentence(idx) {
+    const s     = sentences[idx];
+    const num   = idx + 1;
+    const total = sentences.length;
+    const pct   = Math.round((idx / total) * 100);
+
+    document.getElementById('sentence-counter').textContent = `Sentence ${num} of ${total}`;
+    document.getElementById('sentence-pct').textContent     = pct + '%';
+    document.getElementById('progress-fill').style.width    = pct + '%';
+    document.getElementById('sentence-text').textContent    = s.text;
+
+    document.getElementById('audio-status').textContent    = 'Press Play to hear the sentence.';
+    document.getElementById('stop-btn').disabled           = true;
+    document.getElementById('rec-confirm').style.display   = 'none';
+    document.getElementById('screen-err').style.display    = 'none';
+    document.getElementById('session-rec-bar').style.display = 'flex';
+    document.getElementById('replay-btn').style.display    = 'none';
+    document.getElementById('play-btn').style.display      = 'inline-flex';
+    document.getElementById('play-btn').disabled           = false;
+  }
+
+  document.getElementById('play-btn').addEventListener('click',   () => playSentence());
+  document.getElementById('replay-btn').addEventListener('click', () => playSentence());
+
+  function playSentence() {
+    const s = sentences[currentIdx];
+    document.getElementById('audio-status').textContent = 'Playing...';
+    document.getElementById('play-btn').disabled        = true;
+    document.getElementById('stop-btn').disabled        = true;
+
+    if (s.audio_url) {
+      const audio = new Audio(s.audio_url);
+      audio.onended = onAudioDone;
+      audio.onerror = () => fallbackTTS(s.text);
+      audio.play().catch(() => fallbackTTS(s.text));
+    } else {
+      fallbackTTS(s.text);
+    }
+  }
+
+  function fallbackTTS(text) {
+    if (!window.speechSynthesis) { onAudioDone(); return; }
+    speechSynthesis.cancel();
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.lang  = 'en-US';
+    utt.rate  = 0.9;
+    utt.onend = onAudioDone;
+    speechSynthesis.speak(utt);
+  }
+
+  function onAudioDone() {
+    // Mark the start of this sentence's window
+    currentMarkerStart = elapsed();
+
+    document.getElementById('audio-status').textContent = 'Child is reading — press Stop when finished.';
+    document.getElementById('stop-btn').disabled        = false;
+    document.getElementById('replay-btn').style.display = 'inline-flex';
+    document.getElementById('play-btn').style.display   = 'none';
+  }
+
+  // Examiner presses Stop when child finishes reading
+  document.getElementById('stop-btn').addEventListener('click', () => {
+    const end_ms = elapsed();
+    markers.push({
+      sentence_id: sentences[currentIdx].id,
+      start_ms:    currentMarkerStart,
+      end_ms,
+    });
+
+    document.getElementById('stop-btn').disabled        = true;
+    document.getElementById('rec-confirm').style.display = 'block';
+    setTimeout(advanceSentence, 1200);
+  });
+
+  function advanceSentence() {
+    if (currentIdx + 1 < sentences.length) {
+      currentIdx++;
+      loadSentence(currentIdx);
+    } else {
+      submitAll();
+    }
+  }
+
+  // ── Submit ─────────────────────────────────────────────────────────────────
+  async function submitAll() {
+    show('s-processing');
+    clearInterval(sessionTimerInterval);
+
+    // Stop the continuous recorder and wait for final chunks
+    const sessionBlob = await new Promise(resolve => {
+      sessionRecorder.onstop = () => {
+        resolve(new Blob(sessionChunks, { type: sessionRecorder.mimeType || 'audio/ogg' }));
+      };
+      if (sessionRecorder.state !== 'inactive') sessionRecorder.stop();
+    });
+
+    const form = new FormData();
+    form.append('patient_id',   sessionInfo.patientId);
+    form.append('age',          sessionInfo.age);
+    form.append('percentile',   sessionInfo.percentile);
+    form.append('markers',      JSON.stringify(markers));
+    form.append('session_audio', sessionBlob, 'session.webm');
+
+    try {
+      const res  = await fetch('/api/analyze', { method: 'POST', body: form });
+      const data = await res.json();
+      if (!res.ok) { showProcessingError(data.error || 'Server error'); return; }
+      renderResults(data);
+    } catch (e) {
+      showProcessingError('Request failed: ' + e.message);
+    }
+  }
+
+  function showProcessingError(msg) {
+    show('s-welcome');
+    showWelcomeErr('Analysis failed: ' + msg + ' — please try again.');
+  }
+
+  // ── Results ────────────────────────────────────────────────────────────────
+  function renderResults(data) {
+    const d      = data.Decision || {};
+    const result = d.Result || 'N/A';
+
+    const banner = document.getElementById('result-banner');
+    banner.textContent = result;
+    banner.className   = 'decision-banner ' + result.toLowerCase();
+
+    document.getElementById('r-score').textContent   = d['Total Score'] ?? '—';
+    document.getElementById('r-age').textContent     = d['Age (months)'] ?? '—';
+    document.getElementById('r-pct').textContent     = d.Percentile ? d.Percentile + 'th' : '—';
+    document.getElementById('r-session').textContent = data.session_id ?? '—';
+
+    const tbody = document.getElementById('results-table');
+    tbody.innerHTML = '';
+    const sents = (data['Edit and Score'] || {}).Sentences || [];
+
+    for (const s of sents) {
+      const tags = buildTags(s['Edit Script'] || {});
+      const tr   = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${s.id}</td>
+        <td style="color:#888880">${esc(s['Ground Truth'] || '')}</td>
+        <td>${esc(s.Sentence || '')}${tags ? `<div class="edits">${tags}</div>` : ''}</td>
+        <td>${s.Errors ?? '—'}</td>
+        <td class="s${s.Score ?? ''}">${s.Score ?? '—'}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+
+    show('s-results');
+  }
+
+  function buildTags(script) {
+    const parts = [];
+    for (const [, tok]      of (script.Insertions    || [])) parts.push(`<span class="tag tag-ins">+${esc(tok)}</span>`);
+    for (const [, tok]      of (script.Deletions     || [])) parts.push(`<span class="tag tag-del">-${esc(tok)}</span>`);
+    for (const [, o, n]     of (script.Substitutions || [])) parts.push(`<span class="tag tag-sub">${esc(o)} > ${esc(n)}</span>`);
+    for (const [,,, wi, wj] of (script.Swaps         || [])) parts.push(`<span class="tag tag-swap">${esc(wi)} / ${esc(wj)}</span>`);
+    return parts.join(' ');
+  }
+
+  document.getElementById('new-btn').addEventListener('click', () => {
+    currentIdx  = 0;
+    sessionInfo = {};
+    markers     = [];
+    document.getElementById('age').value        = '';
+    document.getElementById('patient-id').value = '';
+    show('s-welcome');
+  });
+</script>
+</body>
+</html>
