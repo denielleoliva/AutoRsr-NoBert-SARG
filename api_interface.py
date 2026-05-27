@@ -9,6 +9,17 @@ from auto_rsr import standarize, score_rsr_errors, score_rsr, evaluate_rsr_resul
 
 app = Flask(__name__)
 
+ROBOT_FACE_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'robot_face', 'dist')
+
+
+@app.after_request
+def add_coop_coep(response):
+    # COOP/COEP required for SharedArrayBuffer used by vizij WASM — robot face only
+    if request.path.startswith('/robot'):
+        response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
+        response.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
+    return response
+
 SENTENCE_AUDIO_FOLDER = 'sentence_audio'
 RECORDINGS_FOLDER     = 'uploads/recordings'
 PRE_ROLL_MS           = 2000  # seconds of audio before marker start to include
@@ -17,6 +28,9 @@ os.makedirs(SENTENCE_AUDIO_FOLDER, exist_ok=True)
 os.makedirs(RECORDINGS_FOLDER, exist_ok=True)
 
 database.init_db()
+
+# Shared robot face state — written by the examiner app, read by the robot face
+_robot_state = {'state': 'idle', 'text': '', 'sentence_id': None}
 
 GROUND_TRUTH = [
     "The big football player washed the car with the hose.",
@@ -89,6 +103,35 @@ def find_audio_file(sentence_number):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.route('/robot')
+@app.route('/robot/')
+@app.route('/robot/<path:path>')
+def robot_face(path=''):
+    if path:
+        candidate = os.path.join(ROBOT_FACE_DIST, path)
+        if os.path.isfile(candidate):
+            return send_from_directory(ROBOT_FACE_DIST, path)
+    return send_from_directory(ROBOT_FACE_DIST, 'index.html')
+
+
+@app.route('/api/robot/state', methods=['GET'])
+def get_robot_state():
+    return jsonify(_robot_state)
+
+
+@app.route('/api/robot/state', methods=['POST'])
+def set_robot_state():
+    global _robot_state
+    data = request.get_json(force=True) or {}
+    _robot_state = {
+        'state':       data.get('state', 'idle'),
+        'text':        data.get('text', ''),
+        'sentence_id': data.get('sentence_id'),
+        'result':      data.get('result', ''),
+    }
+    return jsonify({'ok': True})
 
 
 @app.route('/api/sentences')
@@ -209,6 +252,30 @@ def analyze():
 @app.route('/api/sessions')
 def get_sessions():
     return jsonify(database.get_sessions())
+
+
+@app.route('/api/sessions/<int:session_id>')
+def get_session(session_id):
+    data = database.get_session(session_id)
+    if not data:
+        return jsonify({'error': 'Session not found'}), 404
+
+    # Build a clean comparison view
+    comparison = []
+    for row in data['sentences']:
+        comparison.append({
+            'sentence_number': row['sentence_number'],
+            'ground_truth':    row['ground_truth'],
+            'response':        row['response'],
+            'errors':          row['errors'],
+            'score':           row['score'],
+            'edit_script':     row['edit_script'],
+        })
+
+    return jsonify({
+        'session':    data['session'],
+        'comparison': comparison,
+    })
 
 
 if __name__ == '__main__':

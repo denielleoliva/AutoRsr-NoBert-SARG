@@ -1,0 +1,30 @@
+{
+  "name": "robot-face",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 3000",
+    "build": "vite build",
+    "preview": "vite preview --port 3000"
+  },
+  "dependencies": {
+    "@react-three/drei": "^10.7.7",
+    "@react-three/fiber": "^9.5.0",
+    "@vizij/orchestrator-react": "^0.1.1",
+    "@vizij/render": "^0.1.1",
+    "@vizij/runtime-react": "^0.2.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "three": "^0.170.0"
+  },
+  "overrides": {
+    "@vizij/node-graph-authoring": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react-swc": "^4.2.2",
+    "typescript": "^5.9.3",
+    "vite": "^6.3.6"
+  }
+}

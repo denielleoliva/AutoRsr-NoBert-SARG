@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Robot Face</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    html, body { width:100vw; height:100vh; overflow:hidden; background:#060612; }
+    canvas { display:block; position:fixed; inset:0; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<!--
+  Launch in kiosk mode on RPi:
+  chromium-browser --kiosk --disable-restore-session-state --noerrdialogs http://localhost:5000/robot
+-->
+<script>
+'use strict';
+
+// ── Config ────────────────────────────────────────────────────────────────────
+const C_BG   = '#060612';
+const C_FACE = '#00D4C8';
+const C_EYE  = '#0A1E1C';
+const C_DARK = '#001814';
+const POLL_MS = 400;
+
+// ── Canvas setup ──────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+let W = 0, H = 0;
+
+function resize() {
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ── Animation values (lerped each frame) ─────────────────────────────────────
+const cur = {
+  mouthOpen:  0,      // 0=closed → 1=fully open
+  mouthSmile: 0.3,    // −1=frown, 0=neutral, 1=smile
+  mouthWave:  0,      // waveform amplitude inside open mouth
+  pupilX:     0,      // −1=left ↔ 1=right
+  pupilY:     0,      // −1=up ↔ 1=down
+  irisScale:  1,      // 0.7=squint, 1=normal, 1.1=wide
+  browH:      0,      // −1=furrowed, 0=neutral, 1=raised
+  floatY:     0,      // breathing offset (px)
+  blinkL:     0,      // 0=open → 1=closed
+  blinkR:     0,
+};
+const tgt = { ...cur };
+
+function lerp(a, b, k) { return a + (b - a) * k; }
+
+function updateAnims(dt) {
+  // Faster lerp for mouth during speech, slower for gaze/brow
+  const kFast = 1 - Math.exp(-dt / 120);
+  const kMed  = 1 - Math.exp(-dt / 220);
+  const kSlow = 1 - Math.exp(-dt / 380);
+
+  cur.mouthOpen  = lerp(cur.mouthOpen,  tgt.mouthOpen,  kFast);
+  cur.mouthWave  = lerp(cur.mouthWave,  tgt.mouthWave,  kFast);
+  cur.mouthSmile = lerp(cur.mouthSmile, tgt.mouthSmile, kMed);
+  cur.irisScale  = lerp(cur.irisScale,  tgt.irisScale,  kMed);
+  cur.pupilX     = lerp(cur.pupilX,     tgt.pupilX,     kMed);
+  cur.pupilY     = lerp(cur.pupilY,     tgt.pupilY,     kMed);
+  cur.browH      = lerp(cur.browH,      tgt.browH,      kMed);
+  cur.floatY     = lerp(cur.floatY,     tgt.floatY,     kSlow);
+  // blink handled separately
+}
+
+// ── Blink system ──────────────────────────────────────────────────────────────
+let blinkPhase  = 'open';
+let blinkTimer  = 0;
+let lastBlinkAt = 0;
+let nextBlink   = rnd(2500, 5000);
+
+function rnd(a, b) { return a + Math.random() * (b - a); }
+
+function updateBlink(dt, ts) {
+  const CLOSE = 75, OPEN = 80;
+  switch (blinkPhase) {
+    case 'open':
+      if (ts - lastBlinkAt > nextBlink) { blinkPhase = 'closing'; blinkTimer = 0; }
+      break;
+    case 'closing':
+      blinkTimer += dt;
+      cur.blinkL = cur.blinkR = Math.min(blinkTimer / CLOSE, 1);
+      if (blinkTimer >= CLOSE) { blinkPhase = 'closed'; blinkTimer = 0; }
+      break;
+    case 'closed':
+      blinkTimer += dt;
+      if (blinkTimer > 55) { blinkPhase = 'opening'; blinkTimer = 0; }
+      break;
+    case 'opening':
+      blinkTimer += dt;
+      cur.blinkL = cur.blinkR = Math.max(1 - blinkTimer / OPEN, 0);
+      if (blinkTimer >= OPEN) {
+        cur.blinkL = cur.blinkR = 0;
+        blinkPhase  = 'open';
+        lastBlinkAt = ts;
+        nextBlink   = rnd(2500, 5000);
+      }
+      break;
+  }
+}
+
+// ── Speech ────────────────────────────────────────────────────────────────────
+let isSpeaking   = false;
+
+function speakText(text) {
+  if (!window.speechSynthesis) return;
+  speechSynthesis.cancel();
+  const utt  = new SpeechSynthesisUtterance(text);
+  utt.lang   = 'en-US';
+  utt.rate   = 0.88;
+  utt.pitch  = 1.05;
+  utt.volume = 1;
+  utt.onend  = () => { isSpeaking = false; };
+  isSpeaking = true;
+  speechSynthesis.speak(utt);
+}
+
+function stopSpeech() {
+  if (window.speechSynthesis) speechSynthesis.cancel();
+  isSpeaking = false;
+}
+
+// ── Face state machine ────────────────────────────────────────────────────────
+let faceState    = 'idle';
+let lastSpokenId = null;  // prevent re-speaking same sentence on repeated polls
+
+function setFaceState(state, data) {
+  faceState = state;
+
+  switch (state) {
+
+    case 'idle':
+      tgt.mouthSmile = 0.35;
+      tgt.mouthOpen  = 0;
+      tgt.mouthWave  = 0;
+      tgt.pupilX     = 0;
+      tgt.pupilY     = 0;
+      tgt.browH      = 0;
+      tgt.irisScale  = 1;
+      stopSpeech();
+      break;
+
+    case 'speaking':
+      tgt.mouthSmile = 0;
+      tgt.browH      = 0.25;
+      tgt.irisScale  = 1.06;
+      tgt.pupilX     = 0;
+      tgt.pupilY     = 0;
+      if (data.text && data.sentence_id !== lastSpokenId) {
+        lastSpokenId = data.sentence_id;
+        speakText(data.text);
+      }
+      break;
+
+    case 'listening':
+      tgt.mouthOpen  = 0;
+      tgt.mouthSmile = 0.2;
+      tgt.mouthWave  = 0;
+      tgt.pupilX     = 0;
+      tgt.pupilY     = -0.25;
+      tgt.browH      = 0.1;
+      tgt.irisScale  = 1.02;
+      stopSpeech();
+      break;
+
+    case 'thinking':
+      tgt.mouthOpen  = 0;
+      tgt.mouthSmile = -0.05;
+      tgt.mouthWave  = 0;
+      tgt.pupilX     = 0.45;
+      tgt.pupilY     = -0.35;
+      tgt.browH      = -0.2;
+      tgt.irisScale  = 0.85;
+      stopSpeech();
+      break;
+
+    case 'done':
+      tgt.mouthOpen  = 0;
+      tgt.mouthSmile = data.result === 'fail' ? 0 : 0.92;
+      tgt.mouthWave  = 0;
+      tgt.pupilX     = 0;
+      tgt.pupilY     = 0;
+      tgt.browH      = data.result === 'fail' ? -0.1 : 0.6;
+      tgt.irisScale  = data.result === 'fail' ? 1 : 0.72; // happy squint
+      stopSpeech();
+      break;
+  }
+}
+
+// ── Polling ───────────────────────────────────────────────────────────────────
+let lastPollKey = '';
+
+async function pollState() {
+  try {
+    const r    = await fetch('/api/robot/state');
+    const data = await r.json();
+    const key  = `${data.state}|${data.sentence_id ?? ''}|${data.text ?? ''}`;
+    if (key !== lastPollKey) {
+      lastPollKey = key;
+      setFaceState(data.state, data);
+    }
+  } catch (_) {}
+}
+setInterval(pollState, POLL_MS);
+pollState();
+
+// ── Draw helpers ──────────────────────────────────────────────────────────────
+function roundRect(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y,     x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x,     y + h, r);
+  ctx.arcTo(x,     y + h, x,     y,     r);
+  ctx.arcTo(x,     y,     x + w, y,     r);
+  ctx.closePath();
+}
+
+function drawGrid() {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(0,212,200,0.028)';
+  ctx.lineWidth   = 1;
+  const gs = 38;
+  for (let x = 0; x < W; x += gs) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  for (let y = 0; y < H; y += gs) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawScanline(t) {
+  const y = ((t * 75) % (H + 60)) - 30;
+  const g = ctx.createLinearGradient(0, y - 30, 0, y + 30);
+  g.addColorStop(0,   'transparent');
+  g.addColorStop(0.5, 'rgba(0,212,200,0.05)');
+  g.addColorStop(1,   'transparent');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, y - 30, W, 60);
+}
+
+function drawEye(cx, cy, ew, eh, blink, px, py, iris) {
+  const openH = eh * (1 - blink * 0.97);
+  if (openH < 2) return;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  ctx.shadowColor = C_FACE;
+  ctx.shadowBlur  = 24;
+
+  roundRect(-ew/2, -openH/2, ew, openH, 14);
+  ctx.fillStyle   = C_EYE;
+  ctx.fill();
+  ctx.strokeStyle = C_FACE;
+  ctx.lineWidth   = 2.5;
+  ctx.stroke();
+
+  if (blink < 0.55) {
+    ctx.save();
+    roundRect(-ew/2, -openH/2, ew, openH, 14);
+    ctx.clip();
+
+    const ir  = Math.min(openH * 0.36, ew * 0.22) * iris;
+    const iox = px * (ew  * 0.30);
+    const ioy = py * (openH * 0.24);
+
+    ctx.shadowColor = C_FACE;
+    ctx.shadowBlur  = 12;
+
+    const grd = ctx.createRadialGradient(iox, ioy, 0, iox, ioy, ir);
+    grd.addColorStop(0,    '#00FFE8');
+    grd.addColorStop(0.45, C_FACE);
+    grd.addColorStop(1,    '#007870');
+    ctx.beginPath();
+    ctx.arc(iox, ioy, ir, 0, Math.PI * 2);
+    ctx.fillStyle = grd;
+    ctx.fill();
+
+    ctx.shadowBlur = 0;
+
+    // Pupil
+    ctx.beginPath();
+    ctx.arc(iox, ioy, ir * 0.42, 0, Math.PI * 2);
+    ctx.fillStyle = C_DARK;
+    ctx.fill();
+
+    // Catchlight
+    ctx.beginPath();
+    ctx.arc(iox - ir * 0.29, ioy - ir * 0.29, ir * 0.16, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.68)';
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+function drawMouth(cx, cy, mw, mh, open, smile, waveAmp, t) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.shadowColor = C_FACE;
+  ctx.shadowBlur  = 16;
+  ctx.lineCap     = 'round';
+
+  if (open < 0.05) {
+    // Closed: curved smile/neutral/frown arc
+    const depth = smile * mh * 0.55;
+    ctx.beginPath();
+    ctx.moveTo(-mw/2, -depth * 0.15);
+    ctx.quadraticCurveTo(0, depth, mw/2, -depth * 0.15);
+    ctx.strokeStyle = C_FACE;
+    ctx.lineWidth   = 3.5;
+    ctx.stroke();
+  } else {
+    // Open: rounded mouth with dark interior
+    const openH = mh * open;
+    const sy    = smile * openH * 0.18;
+
+    function mouthPath() {
+      ctx.beginPath();
+      ctx.moveTo(-mw/2, -openH/2 + sy);
+      ctx.quadraticCurveTo(0, -openH/2 - sy * 0.25, mw/2, -openH/2 + sy);
+      ctx.lineTo(mw/2, openH/2);
+      ctx.quadraticCurveTo(0, openH/2 + sy * 0.45, -mw/2, openH/2);
+      ctx.closePath();
+    }
+
+    mouthPath();
+    ctx.fillStyle   = C_DARK;
+    ctx.fill();
+    ctx.strokeStyle = C_FACE;
+    ctx.lineWidth   = 2.5;
+    ctx.stroke();
+
+    // Speaking waveform bars
+    if (waveAmp > 0.08) {
+      ctx.save();
+      mouthPath();
+      ctx.clip();
+      ctx.shadowBlur  = 8;
+      ctx.lineWidth   = 3.5;
+      ctx.strokeStyle = C_FACE;
+      ctx.globalAlpha = waveAmp;
+      const nBars  = 7;
+      const innerW = mw * 0.72;
+      const step   = innerW / nBars;
+      for (let i = 0; i < nBars; i++) {
+        const bx  = -innerW/2 + i * step + step/2;
+        const amp = openH * 0.38 * Math.abs(Math.sin(t * 9.5 + i * 0.88));
+        ctx.beginPath();
+        ctx.moveTo(bx, -amp);
+        ctx.lineTo(bx, amp);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawThinkingDots(cx, cy, t) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.shadowColor = C_FACE;
+  for (let i = 0; i < 3; i++) {
+    const p = (Math.sin(t * 3.6 - i * 1.1) + 1) / 2;
+    ctx.shadowBlur = 8 + p * 12;
+    ctx.beginPath();
+    ctx.arc((i - 1) * 26, -p * 6, 5 + p * 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(0,212,200,${0.3 + p * 0.7})`;
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawListeningRing(t, fy) {
+  const pulse = (Math.sin(t * 2.8) + 1) / 2;
+  ctx.save();
+  ctx.strokeStyle = `rgba(0,212,200,${0.06 + pulse * 0.09})`;
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.arc(W/2, H/2 + fy, Math.min(W, H) * 0.44, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawEyebrow(cx, cy, ew, browH, side) {
+  // side: 1=left, -1=right
+  const bw = ew * 0.58;
+  const by = cy - 16 - browH * 8;
+  const tilt = side * browH * 5;
+  ctx.save();
+  ctx.strokeStyle = C_FACE;
+  ctx.lineWidth   = 3;
+  ctx.lineCap     = 'round';
+  ctx.shadowColor = C_FACE;
+  ctx.shadowBlur  = 8;
+  ctx.beginPath();
+  ctx.moveTo(cx - bw/2, by + tilt);
+  ctx.lineTo(cx + bw/2, by - tilt);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ── Main render loop ──────────────────────────────────────────────────────────
+let lastTs = 0;
+
+function frame(ts) {
+  const dt = Math.min(ts - lastTs, 50);
+  lastTs = ts;
+  const t  = ts / 1000;
+
+  // Breathing
+  tgt.floatY = Math.sin(t * 0.55) * 5;
+
+  // Speaking: drive mouth open with wave
+  if (faceState === 'speaking' && isSpeaking) {
+    tgt.mouthOpen = 0.40 + Math.abs(Math.sin(t * 8.8)) * 0.42;
+    tgt.mouthWave = 0.55 + Math.sin(t * 6.5) * 0.45;
+  } else if (faceState !== 'speaking') {
+    tgt.mouthOpen = 0;
+    tgt.mouthWave = 0;
+  }
+
+  // Idle: slow pupil wander
+  if (faceState === 'idle') {
+    tgt.pupilX = Math.sin(t * 0.28) * 0.14;
+    tgt.pupilY = Math.sin(t * 0.21 + 1.4) * 0.10;
+  }
+
+  updateAnims(dt);
+  updateBlink(dt, ts);
+
+  const fy = cur.floatY;
+
+  // ── Background ─────────────────────────────────────────────────
+  ctx.fillStyle = C_BG;
+  ctx.fillRect(0, 0, W, H);
+  drawGrid();
+  drawScanline(t);
+
+  // ── Layout ─────────────────────────────────────────────────────
+  const ew  = Math.min(W * 0.208, 162);
+  const eh  = Math.min(H * 0.255, 100);
+  const lx  = W * 0.33;
+  const rx  = W * 0.67;
+  const eyeY = H * 0.40 + fy;
+  const mw  = Math.min(W * 0.285, 210);
+  const mh  = Math.min(H * 0.148, 68);
+  const my  = H * 0.695 + fy;
+
+  if (faceState === 'thinking') {
+    ctx.globalAlpha = 0.42;
+    drawEye(lx, eyeY, ew, eh, Math.min(cur.blinkL + 0.5, 1), cur.pupilX, cur.pupilY, cur.irisScale);
+    drawEye(rx, eyeY, ew, eh, Math.min(cur.blinkR + 0.5, 1), cur.pupilX, cur.pupilY, cur.irisScale);
+    ctx.globalAlpha = 1;
+    drawThinkingDots(W/2, my, t);
+  } else {
+    drawEye(lx, eyeY, ew, eh, cur.blinkL, cur.pupilX, cur.pupilY, cur.irisScale);
+    drawEye(rx, eyeY, ew, eh, cur.blinkR, cur.pupilX, cur.pupilY, cur.irisScale);
+    drawEyebrow(lx, eyeY - eh/2, ew,  cur.browH, 1);
+    drawEyebrow(rx, eyeY - eh/2, ew, -cur.browH, -1);  // mirror for right eye
+    drawMouth(W/2, my, mw, mh, cur.mouthOpen, cur.mouthSmile, cur.mouthWave, t);
+  }
+
+  if (faceState === 'listening') drawListeningRing(t, fy);
+
+  requestAnimationFrame(frame);
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+setFaceState('idle', {});
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

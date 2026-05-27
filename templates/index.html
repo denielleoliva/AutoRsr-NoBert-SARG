@@ -7,6 +7,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <style>
     :root {
       --bg:      #EEEDE8;
@@ -94,6 +96,21 @@
     .progress-track { background: var(--border); border-radius: 99px; height: 5px; overflow: hidden; }
     .progress-fill  { background: var(--primary); height: 100%; border-radius: 99px; transition: width .4s ease; }
 
+    /* Instruction bar */
+    .instruction-bar {
+      background: var(--bg);
+      border: 1.5px solid var(--border);
+      border-radius: var(--r-sm);
+      padding: 12px 16px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--dark);
+      margin-bottom: 20px;
+      line-height: 1.55;
+      text-align: center;
+    }
+    .instruction-bar strong { font-weight: 700; }
+
     /* Sentence display */
     .sentence-box {
       background: var(--yellow);
@@ -101,7 +118,7 @@
       padding: 24px 28px;
       font-size: 1.15rem; font-weight: 700; line-height: 1.6;
       color: var(--dark); text-align: center;
-      margin: 20px 0;
+      margin: 0 0 20px;
     }
 
     /* Controls */
@@ -199,9 +216,45 @@
     }
 
     .divider { border: none; border-top: 1.5px solid var(--border); margin: 24px 0; }
+
+    /* Countdown overlay */
+    .countdown-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(238, 237, 232, 0.97);
+      z-index: 999;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    .countdown-overlay.visible { display: flex; }
+    .countdown-num {
+      font-size: 8rem;
+      font-weight: 800;
+      color: var(--primary);
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    .countdown-sub {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--muted);
+      margin-top: 16px;
+      letter-spacing: 0.04em;
+    }
+
+    /* Result action buttons */
+    .result-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
   </style>
 </head>
 <body>
+
+<!-- COUNTDOWN OVERLAY (fixed, above all screens) -->
+<div class="countdown-overlay" id="countdown-overlay">
+  <div class="countdown-num" id="countdown-num">3</div>
+  <div class="countdown-sub">Recording begins in...</div>
+</div>
 
 <!-- WELCOME -->
 <div id="s-welcome" class="screen active">
@@ -234,6 +287,12 @@
 <!-- SCREENING -->
 <div id="s-screening" class="screen">
   <div class="card">
+
+    <div class="instruction-bar">
+      Press <strong>Play</strong> to hear the sentence read aloud, then ask the child to repeat it.
+      Press <strong>Stop</strong> once the child has finished reading to continue to the next sentence.
+    </div>
+
     <div class="progress-wrap">
       <div class="progress-label">
         <span id="sentence-counter">Sentence 1 of 16</span>
@@ -310,17 +369,33 @@
       </table>
     </div>
 
-    <button class="btn btn-black btn-full" id="new-btn">Start New Screening</button>
+    <div class="result-actions">
+      <button class="btn btn-outline btn-full" id="pdf-btn">Download PDF Report</button>
+      <button class="btn btn-black btn-full" id="new-btn">Start New Screening</button>
+    </div>
   </div>
 </div>
 
 <script>
+  // ── Robot state sync ──────────────────────────────────────────────────────
+  async function postRobotState(state, extra = {}) {
+    try {
+      await fetch('/api/robot/state', {
+        method:  'POST',
+        headers: {'Content-Type': 'application/json'},
+        body:    JSON.stringify({ state, ...extra }),
+      });
+    } catch (_) {}
+  }
+
   // ── State ──────────────────────────────────────────────────────────────────
   let sentences          = [];
   let currentIdx         = 0;
   let sessionInfo        = {};
+  let lastResultData     = null;
 
   // Continuous recording
+  let stream             = null;
   let sessionRecorder    = null;
   let sessionChunks      = [];
   let recordingStartTime = null;
@@ -355,6 +430,18 @@
     el.textContent = msg; el.style.display = 'block';
   }
 
+  // ── Countdown ──────────────────────────────────────────────────────────────
+  async function runCountdown() {
+    const overlay = document.getElementById('countdown-overlay');
+    const numEl   = document.getElementById('countdown-num');
+    overlay.classList.add('visible');
+    for (let i = 3; i >= 1; i--) {
+      numEl.textContent = i;
+      await new Promise(r => setTimeout(r, 950));
+    }
+    overlay.classList.remove('visible');
+  }
+
   // ── Welcome ────────────────────────────────────────────────────────────────
   document.getElementById('start-btn').addEventListener('click', async () => {
     const age = document.getElementById('age').value.trim();
@@ -377,14 +464,20 @@
       showWelcomeErr('Could not load sentences from server.'); return;
     }
 
-    // Request mic and start continuous recording before navigating
+    // Request mic and start continuous recording
     if (!navigator.mediaDevices?.getUserMedia) {
       showWelcomeErr('Microphone not available in this browser.'); return;
     }
 
-    let stream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl:  true,
+        },
+        video: false,
+      });
     } catch (e) {
       showWelcomeErr('Microphone access denied: ' + e.message); return;
     }
@@ -401,7 +494,7 @@
     sessionRecorder.start(100);
     recordingStartTime = Date.now();
 
-    // Session-level timer (displayed in rec bar)
+    // Session-level timer
     sessionSeconds = 0;
     sessionTimerInterval = setInterval(() => {
       sessionSeconds++;
@@ -410,6 +503,8 @@
       document.getElementById('session-timer').textContent = `${m}:${s}`;
     }, 1000);
 
+    // Show countdown, then navigate
+    await runCountdown();
     show('s-screening');
     loadSentence(0);
   });
@@ -445,6 +540,8 @@
     document.getElementById('play-btn').disabled        = true;
     document.getElementById('stop-btn').disabled        = true;
 
+    postRobotState('speaking', { text: s.text, sentence_id: s.id });
+
     if (s.audio_url) {
       const audio = new Audio(s.audio_url);
       audio.onended = onAudioDone;
@@ -466,16 +563,14 @@
   }
 
   function onAudioDone() {
-    // Mark the start of this sentence's window
     currentMarkerStart = elapsed();
-
     document.getElementById('audio-status').textContent = 'Child is reading — press Stop when finished.';
     document.getElementById('stop-btn').disabled        = false;
     document.getElementById('replay-btn').style.display = 'inline-flex';
     document.getElementById('play-btn').style.display   = 'none';
+    postRobotState('listening', { sentence_id: sentences[currentIdx].id });
   }
 
-  // Examiner presses Stop when child finishes reading
   document.getElementById('stop-btn').addEventListener('click', () => {
     const end_ms = elapsed();
     markers.push({
@@ -484,6 +579,7 @@
       end_ms,
     });
 
+    postRobotState('idle');
     document.getElementById('stop-btn').disabled        = true;
     document.getElementById('rec-confirm').style.display = 'block';
     setTimeout(advanceSentence, 1200);
@@ -502,8 +598,8 @@
   async function submitAll() {
     show('s-processing');
     clearInterval(sessionTimerInterval);
+    postRobotState('thinking');
 
-    // Stop the continuous recorder and wait for final chunks
     const sessionBlob = await new Promise(resolve => {
       sessionRecorder.onstop = () => {
         resolve(new Blob(sessionChunks, { type: sessionRecorder.mimeType || 'audio/ogg' }));
@@ -511,11 +607,17 @@
       if (sessionRecorder.state !== 'inactive') sessionRecorder.stop();
     });
 
+    // Release mic so browser stops showing the recording indicator
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+
     const form = new FormData();
-    form.append('patient_id',   sessionInfo.patientId);
-    form.append('age',          sessionInfo.age);
-    form.append('percentile',   sessionInfo.percentile);
-    form.append('markers',      JSON.stringify(markers));
+    form.append('patient_id',    sessionInfo.patientId);
+    form.append('age',           sessionInfo.age);
+    form.append('percentile',    sessionInfo.percentile);
+    form.append('markers',       JSON.stringify(markers));
     form.append('session_audio', sessionBlob, 'session.webm');
 
     try {
@@ -535,8 +637,11 @@
 
   // ── Results ────────────────────────────────────────────────────────────────
   function renderResults(data) {
+    lastResultData = data;
+
     const d      = data.Decision || {};
     const result = d.Result || 'N/A';
+    postRobotState('done', { result: result.toLowerCase() });
 
     const banner = document.getElementById('result-banner');
     banner.textContent = result;
@@ -576,12 +681,90 @@
     return parts.join(' ');
   }
 
+  // ── PDF Download ───────────────────────────────────────────────────────────
+  document.getElementById('pdf-btn').addEventListener('click', () => {
+    if (!lastResultData || !window.jspdf) return;
+
+    const { jsPDF } = window.jspdf;
+    const doc  = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    const d    = lastResultData.Decision || {};
+    const sents = (lastResultData['Edit and Score'] || {}).Sentences || [];
+    const date  = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+    // Header
+    doc.setFillColor(240, 82, 40);
+    doc.rect(0, 0, 210, 18, 'F');
+    doc.setFontSize(13);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(255, 255, 255);
+    doc.text('AutoRSR Screening Report', 14, 12);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    doc.text(date, 196, 12, { align: 'right' });
+
+    // Summary block
+    doc.setTextColor(17, 17, 17);
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Session Summary', 14, 30);
+
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    const summary = [
+      ['Session ID',    lastResultData.session_id ?? 'N/A'],
+      ['Patient ID',    sessionInfo.patientId || 'N/A'],
+      ['Age',           `${d['Age (months)'] ?? '—'} months`],
+      ['Percentile',    d.Percentile ? `${d.Percentile}th` : '—'],
+      ['Total Score',   String(d['Total Score'] ?? '—')],
+      ['Result',        d.Result ?? '—'],
+    ];
+
+    let y = 38;
+    for (const [label, value] of summary) {
+      doc.setFont('helvetica', 'bold');
+      doc.text(label + ':', 14, y);
+      doc.setFont('helvetica', 'normal');
+      doc.text(value, 55, y);
+      y += 7;
+    }
+
+    // Sentence table
+    doc.autoTable({
+      startY: y + 6,
+      head: [['#', 'Ground Truth', 'Response', 'Errors', 'Score']],
+      body: sents.map(s => [
+        s.id,
+        s['Ground Truth'] || '',
+        s.Sentence || '',
+        s.Errors ?? '—',
+        s.Score ?? '—',
+      ]),
+      styles: { fontSize: 8, cellPadding: 3, overflow: 'linebreak' },
+      headStyles: { fillColor: [240, 82, 40], textColor: 255, fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: [238, 237, 232] },
+      columnStyles: {
+        0: { cellWidth: 10 },
+        1: { cellWidth: 58 },
+        2: { cellWidth: 58 },
+        3: { cellWidth: 20 },
+        4: { cellWidth: 20 },
+      },
+      margin: { left: 14, right: 14 },
+    });
+
+    const filename = `autorsr_session${lastResultData.session_id || ''}_${new Date().toISOString().slice(0,10)}.pdf`;
+    doc.save(filename);
+  });
+
+  // ── New Screening ──────────────────────────────────────────────────────────
   document.getElementById('new-btn').addEventListener('click', () => {
-    currentIdx  = 0;
-    sessionInfo = {};
-    markers     = [];
+    currentIdx      = 0;
+    sessionInfo     = {};
+    markers         = [];
+    lastResultData  = null;
     document.getElementById('age').value        = '';
     document.getElementById('patient-id').value = '';
+    postRobotState('idle');
     show('s-welcome');
   });
 </script>
