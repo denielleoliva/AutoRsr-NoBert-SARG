@@ -6,12 +6,57 @@ const VISEME_SEGMENTS = [
   'a', 'at', 'b', 'e', 'e_2', 'f', 'i', 'k',
   'm', 'o', 'o_2', 'p', 'r', 's', 't', 't_2', 'u',
 ] as const;
+type Viseme = typeof VISEME_SEGMENTS[number];
 
-const VISEME_GRAPH = 'hugo_latest_visemes_pose_graph';
+const VISEME_GRAPH  = 'hugo_latest_visemes_pose_graph';
 const EMOTION_GRAPH = 'hugo_latest_emotions_pose_graph';
 
-// Mouth animation interval — animateValue duration matches tick so tweens chain smoothly
-const MOUTH_TICK_MS = 80;
+// ms per viseme frame — roughly one phoneme at 0.85× speech rate
+const VISEME_TICK_MS = 110;
+
+// --- Phoneme → viseme mapping ---
+interface VisemeFrame { viseme: Viseme; jaw: number }
+
+function textToVisemeSequence(text: string): VisemeFrame[] {
+  const seq: VisemeFrame[] = [];
+
+  for (const word of text.toLowerCase().split(/\s+/)) {
+    const w = word.replace(/[^a-z]/g, '');
+    if (!w) continue;
+
+    for (const ch of w) {
+      let frame: VisemeFrame;
+      switch (ch) {
+        case 'a':                        frame = { viseme: 'a',   jaw: 0.75 }; break;
+        case 'e':                        frame = { viseme: 'e',   jaw: 0.50 }; break;
+        case 'i':                        frame = { viseme: 'i',   jaw: 0.40 }; break;
+        case 'o':                        frame = { viseme: 'o',   jaw: 0.65 }; break;
+        case 'u':                        frame = { viseme: 'u',   jaw: 0.50 }; break;
+        case 'b': case 'm': case 'p':   frame = { viseme: 'm',   jaw: 0.02 }; break;
+        case 'f': case 'v':             frame = { viseme: 'f',   jaw: 0.20 }; break;
+        case 's': case 'z':             frame = { viseme: 's',   jaw: 0.15 }; break;
+        case 't': case 'd': case 'n':   frame = { viseme: 't',   jaw: 0.25 }; break;
+        case 'k': case 'g':             frame = { viseme: 'k',   jaw: 0.30 }; break;
+        case 'r':                        frame = { viseme: 'r',   jaw: 0.35 }; break;
+        default:                         frame = { viseme: 'at',  jaw: 0.30 }; break;
+      }
+
+      // Skip consecutive identical visemes
+      const prev = seq[seq.length - 1];
+      if (!prev || prev.viseme !== frame.viseme) seq.push(frame);
+    }
+
+    // Brief lip closure between words
+    const last = seq[seq.length - 1];
+    if (!last || last.viseme !== 'm') seq.push({ viseme: 'm', jaw: 0 });
+  }
+
+  return seq.length ? seq : [{ viseme: 'a', jaw: 0.5 }];
+}
+
+// --- Component ---
+
+const EMOTION_GRAPH_EMOTIONS = ['angry', 'concerned', 'happy', 'neutral', 'sad', 'sleepy', 'surprise'];
 
 export function FaceBehavior() {
   const { ready, faceId, setInput, animateValue } = useVizijRuntime();
@@ -25,8 +70,8 @@ export function FaceBehavior() {
 
   const lastSpokenIdRef  = useRef<string | null>(null);
   const mouthIntervalRef = useRef<number>(0);
-  const blinkTimerRef   = useRef<number>(0);
-  const glanceTimerRef  = useRef<number>(0);
+  const blinkTimerRef    = useRef<number>(0);
+  const glanceTimerRef   = useRef<number>(0);
 
   // --- Helpers ---
 
@@ -40,11 +85,20 @@ export function FaceBehavior() {
 
   const clearEmotions = useCallback(() => {
     if (!ready || !faceId) return;
-    const emotions = ['angry', 'concerned', 'happy', 'neutral', 'sad', 'sleepy', 'surprise'];
-    emotions.forEach((e) => {
+    EMOTION_GRAPH_EMOTIONS.forEach((e) => {
       setInput(rig(`${EMOTION_GRAPH}/${e}.weight`), { float: 0 });
     });
   }, [ready, faceId, rig, setInput]);
+
+  const returnMouthToNeutral = useCallback(() => {
+    if (!ready || !faceId) return;
+    const dur = 0.2;
+    void animateValue(rig('mouth/jawud/value'),    { float: 0 }, { duration: dur });
+    void animateValue(rig('standard/mouth/morph'), { float: 0 }, { duration: dur });
+    VISEME_SEGMENTS.forEach((seg) => {
+      void animateValue(rig(`${VISEME_GRAPH}/${seg}.weight`), { float: 0 }, { duration: dur });
+    });
+  }, [ready, faceId, rig, animateValue]);
 
   const clearVisemes = useCallback(() => {
     if (!ready || !faceId) return;
@@ -79,26 +133,26 @@ export function FaceBehavior() {
   const performBlink = useCallback(() => {
     if (!ready || !faceId) return;
     const closed = { float: 0.9 };
-    void animateValue(rig('blink'),                                    closed, { duration: 0.07, easing: 'easeIn' });
+    void animateValue(rig('blink'),                                   closed, { duration: 0.07, easing: 'easeIn' });
     void animateValue(rig('standard/left_eye_top_eyelid/pos/y'),  closed, { duration: 0.07, easing: 'easeIn' });
     void animateValue(rig('standard/right_eye_top_eyelid/pos/y'), closed, { duration: 0.07, easing: 'easeIn' });
     window.setTimeout(() => {
       if (!ready || !faceId) return;
       const open = { float: 0 };
-      void animateValue(rig('blink'),                                    open, { duration: 0.12, easing: 'easeOut' });
+      void animateValue(rig('blink'),                                   open, { duration: 0.12, easing: 'easeOut' });
       void animateValue(rig('standard/left_eye_top_eyelid/pos/y'),  open, { duration: 0.12, easing: 'easeOut' });
       void animateValue(rig('standard/right_eye_top_eyelid/pos/y'), open, { duration: 0.12, easing: 'easeOut' });
     }, 80);
   }, [ready, faceId, rig, animateValue]);
 
-  // --- Glance ---
+  // --- Glance: subtle, infrequent ---
   const performGlance = useCallback(() => {
     if (!ready || !faceId) return;
-    const x   = Math.random() * 0.8 - 0.4;
-    const y   = Math.random() * 0.5 - 0.15;
-    const dur = 0.4 + Math.random() * 0.5;
-    void animateValue(rig('standard/left_eye/pos/x'),  { float: x - 0.03 }, { duration: dur, easing: 'easeInOut' });
-    void animateValue(rig('standard/right_eye/pos/x'), { float: x + 0.03 }, { duration: dur, easing: 'easeInOut' });
+    const x   = Math.random() * 0.3 - 0.15;
+    const y   = Math.random() * 0.2 - 0.05;
+    const dur = 0.5 + Math.random() * 0.5;
+    void animateValue(rig('standard/left_eye/pos/x'),  { float: x - 0.02 }, { duration: dur, easing: 'easeInOut' });
+    void animateValue(rig('standard/right_eye/pos/x'), { float: x + 0.02 }, { duration: dur, easing: 'easeInOut' });
     void animateValue(rig('standard/left_eye/pos/y'),  { float: y },         { duration: dur, easing: 'easeInOut' });
     void animateValue(rig('standard/right_eye/pos/y'), { float: y },         { duration: dur, easing: 'easeInOut' });
   }, [ready, faceId, rig, animateValue]);
@@ -111,7 +165,7 @@ export function FaceBehavior() {
       glanceTimerRef.current = window.setTimeout(() => {
         performGlance();
         scheduleGlance();
-      }, 1800 + Math.random() * 2400);
+      }, 5000 + Math.random() * 5000);
     };
 
     const scheduleBlink = () => {
@@ -130,63 +184,50 @@ export function FaceBehavior() {
     };
   }, [ready, performGlance, performBlink]);
 
-  // --- Mouth animation via setInterval + animateValue ---
-  // animateValue keeps the vizij step loop active and guarantees the tween is processed;
-  // MOUTH_TICK_MS duration means each tick smoothly transitions to the next target.
-  const startMouthAnimation = useCallback(() => {
+  // --- Mouth: one viseme at a time, derived from text phonemes ---
+  const startMouthAnimation = useCallback((textToAnimate: string) => {
     if (!ready || !faceId) return;
 
-    const tick = () => {
-      const t   = performance.now() / 1000;
-      const dur = MOUTH_TICK_MS / 1000;
+    const sequence = textToVisemeSequence(textToAnimate);
+    let idx = 0;
 
-      // Jaw open/close at natural speech rhythm (~4–5 Hz)
-      const jaw = Math.max(0, Math.sin(t * 4.8) * 0.65 + 0.15);
-      void animateValue(rig('mouth/jawud/value'),    { float: jaw }, { duration: dur });
-      void animateValue(rig('standard/mouth/morph'), { float: jaw }, { duration: dur });
+    const applyFrame = (frame: VisemeFrame) => {
+      const dur = VISEME_TICK_MS / 1000;
+      void animateValue(rig('mouth/jawud/value'),    { float: frame.jaw }, { duration: dur });
+      void animateValue(rig('standard/mouth/morph'), { float: frame.jaw }, { duration: dur });
 
-      // Visemes at different frequencies and phases for natural variety
-      const aW = Math.max(0, Math.sin(t * 4.8 + 0.2) * 0.75);          // open vowel, tracks jaw
-      const oW = Math.max(0, Math.sin(t * 2.9 + 1.8) * 0.50);          // rounded, slower
-      const eW = Math.max(0, Math.sin(t * 3.3 + 0.9) * 0.40);          // spread lips
-      const uW = Math.max(0, Math.sin(t * 2.0 + 2.6) * 0.35);          // labial round, slow
-      const mW = Math.max(0, Math.sin(t * 6.2 + 0.7) * 0.30);          // bilabial flicker
-      const fW = Math.max(0, Math.sin(t * 5.1 + 3.2) * 0.25);          // fricative shape
-
-      // Normalise so total viseme weight stays ≤ 1
-      const total = aW + oW + eW + uW + mW + fW;
-      const s     = total > 1 ? 1 / total : 1;
-
-      void animateValue(rig(`${VISEME_GRAPH}/a.weight`), { float: aW * s }, { duration: dur });
-      void animateValue(rig(`${VISEME_GRAPH}/o.weight`), { float: oW * s }, { duration: dur });
-      void animateValue(rig(`${VISEME_GRAPH}/e.weight`), { float: eW * s }, { duration: dur });
-      void animateValue(rig(`${VISEME_GRAPH}/u.weight`), { float: uW * s }, { duration: dur });
-      void animateValue(rig(`${VISEME_GRAPH}/m.weight`), { float: mW * s }, { duration: dur });
-      void animateValue(rig(`${VISEME_GRAPH}/f.weight`), { float: fW * s }, { duration: dur });
+      // Drive exactly one viseme to 1, all others to 0
+      VISEME_SEGMENTS.forEach((seg) => {
+        void animateValue(
+          rig(`${VISEME_GRAPH}/${seg}.weight`),
+          { float: seg === frame.viseme ? 1.0 : 0 },
+          { duration: dur },
+        );
+      });
     };
 
-    tick(); // fire immediately so there's no initial delay
-    mouthIntervalRef.current = window.setInterval(tick, MOUTH_TICK_MS);
+    applyFrame(sequence[0]);
+    mouthIntervalRef.current = window.setInterval(() => {
+      idx = (idx + 1) % sequence.length;
+      applyFrame(sequence[idx]);
+    }, VISEME_TICK_MS);
   }, [ready, faceId, rig, animateValue]);
 
   // --- TTS ---
-  const speakText = useCallback(
-    (textToSpeak: string) => {
-      if (typeof window === 'undefined' || !window.speechSynthesis) return;
-      window.speechSynthesis.cancel();
+  const speakText = useCallback((textToSpeak: string) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
 
-      const utterance  = new SpeechSynthesisUtterance(textToSpeak);
-      utterance.rate   = 0.85;
-      utterance.pitch  = 1.0;
+    const utterance  = new SpeechSynthesisUtterance(textToSpeak);
+    utterance.rate   = 0.85;
+    utterance.pitch  = 1.0;
 
-      // Don't stop mouth animation here — Chrome fires onend early on long sentences.
-      // The state machine calls stopSpeech() when the robot state transitions away from speaking.
-      utterance.onerror = () => { window.speechSynthesis.cancel(); };
+    // Don't stop animation on onend — Chrome fires it early on long sentences.
+    // stopSpeech() is called by the state machine when state leaves speaking.
+    utterance.onerror = () => { window.speechSynthesis.cancel(); };
 
-      window.speechSynthesis.speak(utterance);
-    },
-    [clearVisemes],
-  );
+    window.speechSynthesis.speak(utterance);
+  }, []);
 
   const stopSpeech = useCallback(() => {
     if (typeof window !== 'undefined' && window.speechSynthesis) {
@@ -194,7 +235,8 @@ export function FaceBehavior() {
     }
     clearInterval(mouthIntervalRef.current);
     clearVisemes();
-  }, [clearVisemes]);
+    returnMouthToNeutral();
+  }, [clearVisemes, returnMouthToNeutral]);
 
   // --- State machine ---
   useEffect(() => {
@@ -202,11 +244,13 @@ export function FaceBehavior() {
 
     switch (state) {
       case 'idle': {
+        lastSpokenIdRef.current = null;
         stopSpeech();
         clearEmotions();
-        setEmotion('neutral', 0.4, 0.6);
+        setEmotion('neutral', 0.2, 0.6);
+        setEmotion('happy',   0.2, 0.6);
         gazeForward(0, 0.6);
-        setEyelids(0, 0.4);
+        setEyelids(0, 0.2);
         break;
       }
 
@@ -217,23 +261,26 @@ export function FaceBehavior() {
 
         stopSpeech();
         clearEmotions();
-        setEmotion('neutral', 0.3, 0.3);
+        setEmotion('neutral', 0.15, 0.3);
+        setEmotion('happy',   0.1,  0.3);
         gazeForward(0.1, 0.3);
-        setEyelids(0, 0.2);
+        setEyelids(0, 0.1);
 
         if (text) {
-          startMouthAnimation();
+          startMouthAnimation(text);
           speakText(text);
         }
         break;
       }
 
       case 'listening': {
+        lastSpokenIdRef.current = null;
         stopSpeech();
         clearEmotions();
-        setEmotion('neutral', 0.3, 0.4);
+        setEmotion('neutral', 0.15, 0.4);
+        setEmotion('happy',   0.2, 0.4);
         gazeForward(0.3, 0.4);
-        setEyelids(0, 0.3);
+        setEyelids(0, 0.1);
         break;
       }
 
@@ -253,9 +300,9 @@ export function FaceBehavior() {
       case 'done': {
         clearVisemes();
         clearEmotions();
-        setEmotion('happy', 0.6, 0.6);
+        setEmotion('happy', 0.3, 0.6);
         gazeForward(0.15, 0.5);
-        setEyelids(0, 0.4);
+        setEyelids(0, 0.1);
         break;
       }
     }
